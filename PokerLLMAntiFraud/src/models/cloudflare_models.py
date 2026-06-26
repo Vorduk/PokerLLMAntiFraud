@@ -2,6 +2,7 @@ import json
 import aiohttp
 from .base_model import BaseModel
 from .schemas import GameData, FraudDetectionResponse
+import re
 
 
 class CloudflareModels(BaseModel):
@@ -126,11 +127,17 @@ RESPOND IN THIS EXACT JSON FORMAT:
                 # Если ничего не нашли
                 raise Exception(f"Unexpected API response structure: {json.dumps(result, indent=2)}")
 
-
     def _parse_response(self, raw_response: str) -> FraudDetectionResponse:
-        """Parse model response to structured format"""
+        """Parse model response, stripping markdown fences if present."""
+        # Strip possible markdown code block (```json ... ```)
+        cleaned = raw_response.strip()
+        if cleaned.startswith("```"):
+            # Remove opening ```json (or just ```) and closing ```
+            cleaned = re.sub(r'^```(?:json)?\s*', '', cleaned)
+            cleaned = re.sub(r'\s*```$', '', cleaned)
+            cleaned = cleaned.strip()
         try:
-            data = json.loads(raw_response)
+            data = json.loads(cleaned)
             return FraudDetectionResponse(
                 fraud_probability=float(data["fraud_probability"]),
                 reasoning=data.get("reasoning", ""),
