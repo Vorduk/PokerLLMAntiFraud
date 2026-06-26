@@ -1,5 +1,5 @@
 def get_test_game() -> str:
-    raw_hand = """0  Player Debajitb plays at seat 0 with 9.99
+    raw_game = """0  Player Debajitb plays at seat 0 with 9.99
 0  Player Debajitb with In Deal, Blind To Come Posted, Dirty and None
 0  Player Andrhatya plays at seat 2 with 10.00
 0  Player Andrhatya with In Deal, Blind To Come Posted, Dirty and None
@@ -27,4 +27,4 @@ def get_test_game() -> str:
 32  Player Debajitb won 12.85
 38  Table is resumed
 38  Player Debajitb take a prize 12.85 with rake 0.75"""
-    return raw_hand
+    return raw_game
