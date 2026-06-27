@@ -17,7 +17,6 @@ class ModelFactory:
         providers = self._config.get("providers", {})
 
         for provider_id, provider_data in providers.items():
-            # Берём base_url провайдера, если есть
             provider_base_url = provider_data.get("base_url", "")
             for account in provider_data.get("accounts", []):
                 account_id = account["account_id"]

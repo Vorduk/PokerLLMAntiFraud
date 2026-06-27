@@ -2,9 +2,7 @@ from PokerLLMAntiFraud.src.models.schemas import GameData, FraudDetectionRespons
 from PokerLLMAntiFraud.src.models.model_factory import ModelFactory
 from PokerLLMAntiFraud.src.models.base_model import BaseModel
 
-
 class AIAnalyzer:
-
 
     def __init__(self, model_factory: ModelFactory):
         self.factory = model_factory

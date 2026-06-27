@@ -37,7 +37,7 @@ class CloudflareModels(BaseModel):
         recent_actions = actions[-10:] if len(actions) > 10 else actions
         actions_text = "\n".join(f"  {a}" for a in recent_actions)
 
-        prompt = f"""You are a poker fraud detection expert. Analyze this Texas Hold'em hand for suspicious activity.
+        prompt = f"""You are a poker fraud detection expert. Analyze this Texas Hold'em hand for suspicious activity. If you don't see signs of fraud, don't invent them; many games can be fraud-free.
 
 GAME INFORMATION:
 - Type: {game.get('game_type', 'Heads-up NL Hold\'em')}
@@ -82,7 +82,8 @@ RESPOND IN THIS EXACT JSON FORMAT:
 
         url = f"{self.base_url}/{self.model_id}"
 
-        async with aiohttp.ClientSession() as session:
+        timeout = aiohttp.ClientTimeout(total=120)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.post(url, headers=self.headers, json=payload) as response:
                 if response.status != 200:
                     error_text = await response.text()
@@ -90,7 +91,6 @@ RESPOND IN THIS EXACT JSON FORMAT:
 
                 data = await response.json()
 
-                # Временный вывод полного ответа для диагностики
                 print("\n[DEBUG] Full API response:", json.dumps(data, indent=2, ensure_ascii=False))
 
                 if not data.get("success", False):
@@ -99,7 +99,6 @@ RESPOND IN THIS EXACT JSON FORMAT:
 
                 result = data["result"]
 
-                # Для чат‑моделей ответ всегда лежит в choices
                 if "choices" in result and len(result["choices"]) > 0:
                     msg = result["choices"][0]["message"]
                     content = msg.get("content")
@@ -108,23 +107,20 @@ RESPOND IN THIS EXACT JSON FORMAT:
                     if content is not None and content.strip():
                         return content
 
-                    # Контент пуст – возможно, модель потратила все токены на reasoning
+                    # Content is empty:
                     if reasoning:
                         print("[WARNING] content is empty, but reasoning field is present. "
                               "Consider increasing max_tokens or disabling reasoning.")
-                        # Можно попытаться найти JSON в reasoning (ненадёжно)
-                        # Для надёжности всё же выбрасываем исключение, чтобы разработчик увидел проблему
                     raise Exception("Model returned empty content. Possibly output truncated due to low max_tokens. "
                                     "Reasoning length: " + str(len(reasoning or "")))
 
-                # На случай, если структура другая (не чат‑модель) — но для gemma это не нужно
                 if "response" in result:
                     resp = result["response"]
                     if resp is None:
                         raise Exception("Model returned null response.")
                     return resp
 
-                # Если ничего не нашли
+                # Nothing found
                 raise Exception(f"Unexpected API response structure: {json.dumps(result, indent=2)}")
 
     def _parse_response(self, raw_response: str) -> FraudDetectionResponse:
