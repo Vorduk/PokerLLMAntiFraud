@@ -16,3 +16,6 @@ class FraudDetectionManager:
         """Analyze a single game"""
         game = await self.fetcher.fetch_single_game(game_id)
         return await self.analyzer.analyze_game(game, model_id)
+
+    async def step(self):
+        print('step')
