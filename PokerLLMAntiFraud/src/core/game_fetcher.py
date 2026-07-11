@@ -1,6 +1,6 @@
 import re
 from typing import Optional
-from PokerLLMAntiFraud.src.models.schemas import GameData
+from PokerLLMAntiFraud.src.models.dataclasses import GameData
 
 class GameFetcher:
     """Fetches and parses poker games from hand history strings"""

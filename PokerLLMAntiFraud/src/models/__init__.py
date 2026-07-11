@@ -1,6 +1,6 @@
 from .base_model import BaseModel
 from .model_factory import ModelFactory
-from .schemas import GameData, FraudDetectionResponse
+from .dataclasses import GameData, FraudDetectionResponse
 
 __all__ = [
     'BaseModel',

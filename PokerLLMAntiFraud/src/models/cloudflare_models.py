@@ -1,7 +1,7 @@
 import json
 import aiohttp
 from .base_model import BaseModel
-from .schemas import GameData, FraudDetectionResponse
+from .dataclasses import GameData, FraudDetectionResponse
 import re
 
 

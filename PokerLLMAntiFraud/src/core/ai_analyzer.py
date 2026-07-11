@@ -1,4 +1,4 @@
-from PokerLLMAntiFraud.src.models.schemas import GameData, FraudDetectionResponse
+from PokerLLMAntiFraud.src.models.dataclasses import GameData, FraudDetectionResponse
 from PokerLLMAntiFraud.src.models.model_factory import ModelFactory
 from PokerLLMAntiFraud.src.models.base_model import BaseModel
 
