@@ -1,6 +1,6 @@
 import openpyxl
 from openpyxl.utils import get_column_letter
-from .dataclasses import FraudRecord
+from .mydataclasses import FraudRecord
 from typing import List
 
 class TableFormatter:

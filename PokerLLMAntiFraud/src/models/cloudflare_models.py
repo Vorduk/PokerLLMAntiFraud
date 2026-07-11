@@ -1,7 +1,7 @@
 import json
 import aiohttp
 from .base_model import BaseModel
-from .dataclasses import GameData, FraudDetectionResponse
+from .mydataclasses import GameData, FraudDetectionResponse
 import re
 
 
@@ -21,54 +21,44 @@ class CloudflareModels(BaseModel):
 
     def _build_prompt(self, game_data: GameData) -> str:
         """Build prompt for fraud detection in poker"""
-        game = game_data.game_data
-        players = game.get('players', [])
-        actions = game.get('actions', [])
-        community_cards = game.get('community_cards', [])
-        dealt_cards = game.get('dealt_cards', {})
-        result = game.get('result', {})
-        blinds = game.get('blinds', {})
-
         players_text = ""
-        for p in players:
-            cards = dealt_cards.get(p['name'], ['unknown'])
-            players_text += f"- {p['name']}: {', '.join(cards)}\n"
+        for p in game_data.participants:
+            players_text += f"- Player {p.player_id} (stack: {p.stack_at_hand_end})\n"
 
-        recent_actions = actions[-10:] if len(actions) > 10 else actions
-        actions_text = "\n".join(f"  {a}" for a in recent_actions)
+        cards_text = ", ".join(game_data.cards) if game_data.cards else "None"
 
-        prompt = f"""You are a poker fraud detection expert. Analyze this Texas Hold'em hand for suspicious activity. If you don't see signs of fraud, don't invent them; many games can be fraud-free.
+        prompt = f"""You are a poker fraud detection expert. Analyze this poker hand for suspicious activity.
 
-GAME INFORMATION:
-- Type: {game.get('game_type', 'Heads-up NL Hold\'em')}
-- Blinds: {blinds.get('small', '?')}/{blinds.get('big', '?')}
-- Community Cards: {', '.join(community_cards)}
+    GAME INFORMATION:
+    - Game ID: {game_data.game_id}
+    - Table ID: {game_data.table_id}
+    - Type: {game_data.game_type}
+    - Started: {game_data.date_start}
+    - Ended: {game_data.date_stop}
+    - Rake: {game_data.rake}
+    - Community Cards: {cards_text}
 
-PLAYERS AND THEIR CARDS:
-{players_text}
+    PARTICIPANTS:
+    {players_text}
 
-RESULT:
-- Winner: {result.get('winner', 'Unknown')}
-- Pot: {result.get('pot', 'Unknown')}
-- Rake: {result.get('rake', 'Unknown')}
+    RAW HAND HISTORY:
+    {game_data.raw_hand_history[:3000]}
 
-RECENT ACTIONS:
-{actions_text}
+    TASK:
+    Analyze this hand for potential fraud indicators:
+    1. Unusual betting patterns
+    2. Suspicious timing
+    3. Potential collusion (soft play, chip dumping)
+    4. Bot-like behavior (mechanical patterns, unnatural bet sizing)
+    5. Card sharing (players knowing cards they shouldn't)
 
-TASK:
-Analyze this hand for potential fraud indicators:
-1. Unusual betting patterns (extremely large raises, min-raises, etc.)
-2. Suspicious timing (consistent delays or instant actions)
-3. Potential collusion (soft play, chip dumping)
-4. Bot-like behavior (mechanical patterns, unnatural bet sizing)
-5. Card sharing (players knowing cards they shouldn't)
-
-RESPOND IN THIS EXACT JSON FORMAT:
-{{
-    "fraud_probability": <number between 0.0 and 1.0>,
-    "reasoning": "<detailed explanation with specific evidence>"
-}}
-"""
+    RESPOND IN THIS EXACT JSON FORMAT:
+    {{
+        "fraud_probability": <number between 0 and 100>,
+        "reasoning": "<detailed explanation with specific evidence>",
+        "incident_types": ["<type1>", "<type2>", ...]
+    }}
+    """
         return prompt
 
     async def _send_request(self, prompt: str) -> str:
@@ -125,23 +115,18 @@ RESPOND IN THIS EXACT JSON FORMAT:
 
     def _parse_response(self, raw_response: str) -> FraudDetectionResponse:
         """Parse model response, stripping markdown fences if present."""
-        # Strip possible markdown code block (```json ... ```)
         cleaned = raw_response.strip()
         if cleaned.startswith("```"):
-            # Remove opening ```json (or just ```) and closing ```
             cleaned = re.sub(r'^```(?:json)?\s*', '', cleaned)
             cleaned = re.sub(r'\s*```$', '', cleaned)
             cleaned = cleaned.strip()
         try:
             data = json.loads(cleaned)
             return FraudDetectionResponse(
-                fraud_probability=float(data["fraud_probability"]),
+                fraud_probability=int(data["fraud_probability"]),
                 reasoning=data.get("reasoning", ""),
-                model_used=self.model_name
+                model_used=self.model_name,
+                incident_types=data.get("incident_types", []),
             )
-        except (json.JSONDecodeError, KeyError, ValueError):
-            return FraudDetectionResponse(
-                fraud_probability=0.0,
-                reasoning=raw_response,
-                model_used=self.model_name
-            )
+        except (json.JSONDecodeError, KeyError, ValueError) as e:
+            raise ValueError(f"Failed to parse model response: {e}\nRaw response: {raw_response[:500]}")

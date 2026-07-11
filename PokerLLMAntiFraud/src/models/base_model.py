@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from .dataclasses import GameData, FraudDetectionResponse
+from .mydataclasses import GameData, FraudDetectionResponse
 
 class BaseModel(ABC):
     """Base class for all AI models"""

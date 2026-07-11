@@ -1,280 +1,334 @@
+from PokerLLMAntiFraud.src.core.mydataclasses import FraudIncident, FraudGame
+from PokerLLMAntiFraud.src.models.mydataclasses import GameData, Participant
 import re
-from typing import Optional
-from PokerLLMAntiFraud.src.models.dataclasses import GameData
+import aiohttp
+from bs4 import BeautifulSoup
+from datetime import datetime, timezone, timedelta
+from typing import List, Dict, Optional
 
 class GameFetcher:
-    """Fetches and parses poker games from hand history strings"""
+    def __init__(self, base_url: str, session_id: str = None):
+        self.base_url = base_url.rstrip('/')
+        self.session_id = session_id
+        self._processed_incidents_ids: set = set()
+        self._processed_game_ids: set = set()
+        self._http_session: Optional[aiohttp.ClientSession] = None
 
-    ACTION_MAP = {
-        'BT': 'bets',
-        'CL': 'calls',
-        'RS': 'raises',
-        'CH': 'checks',
-        'F': 'folds',
-        'FS': 'folds and shows',
-        'FF': 'fast folds',
-        'SB': 'posts small blind',
-        'BB': 'posts big blind',
-        'EB': 'posts extra blind',
-        'AN': 'posts ante',
-        'SR': 'posts straddle',
-        'BI': 'posts bring-in',
-    }
+    async def _get_session(self) -> aiohttp.ClientSession:
+        if self._http_session is None:
+            self._http_session = aiohttp.ClientSession(
+                cookies={'PHPSESSID': self.session_id} if self.session_id else {},
+                headers={
+                    'Accept': 'application/vnd.api+json',
+                    'Content-Type': 'application/vnd.api+json',
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:152.0) Gecko/20100101 Firefox/152.0',
+                    'Referer': f'{self.base_url}/webadmin-5rd/antifraud/incidents',
+                }
+            )
+        return self._http_session
 
-    async def fetch_single_game(self, game_id: str) -> GameData:
-        """
-        Parse raw hand history string into structured GameData.
+    async def close(self):
+        if self._http_session:
+            await self._http_session.close()
+            self._http_session = None
 
-        Args:
-            game_id: Game id to fetch
+    # Real API fetching of fraud incidents
+    async def fetch_new_incidents(self, lookback_minutes: int = 5) -> List[FraudIncident]:
+        session = await self._get_session()
+        now = datetime.now(timezone.utc)
+        from_time = now - timedelta(minutes=lookback_minutes)
 
-        Returns:
-            GameData with parsed game information
-        """
-
-        # Temporary test data
-        from PokerLLMAntiFraud.src.data_sources.test_game import get_test_game
-        raw_game = get_test_game()
-
-        return self._parse_hand_history(raw_game)
-
-    def _parse_hand_history(self, raw_text: str) -> GameData:
-        """
-        Parse raw hand history text into structured format.
-        """
-        lines = raw_text.strip().split('\n')
-
-        game_data = {
-            "game_type": "Unknown",
-            "blinds": {"small": 0.0, "big": 0.0},
-            "players": [],
-            "dealt_cards": {},
-            "actions": [],
-            "community_cards": [],
-            "result": {
-                "winner": "Unknown",
-                "pot": 0.0,
-                "rake": 0.0
-            },
-            "raw_hand_history": raw_text
+        # Get the list of incidents (without metadata)
+        list_params = {
+            'include': '_type,status,participants',  # metadata is not needed here
+            'itemsPerPage': '20',
+            'page': '1',
+            'order[updatedAtStamp]': 'desc',
+            'from': from_time.strftime('%Y-%m-%dT%H:%M:%S.000Z'),
+            'to': now.strftime('%Y-%m-%dT%H:%M:%S.000Z'),
+            '_SESSID': self.session_id,
         }
+        url = f'{self.base_url}/apiweb/fraud-incidents'
+        new_incidents = []
 
-        players_info = {}  # seat -> {"name": str, "stack": float}
-        current_pot = 0.0
+        # Iterate through the list pages
+        while url:
+            async with session.get(url, params=list_params if '?' not in url else None) as resp:
+                resp.raise_for_status()
+                list_data = await resp.json()
 
-        for line in lines:
-            line = line.strip()
-            if not line:
+            # Process each incident in the list
+            for inc_summary in list_data.get('data', []):
+                inc_id = inc_summary['id']  # full path /apiweb/fraud-incidents/...
+                internal_id = inc_summary['attributes']['_id']  # numeric ID
+                if inc_id in self._processed_incidents_ids:
+                    continue
+
+                # Request incident details (with metadata)
+                detail_url = f'{self.base_url}/apiweb/fraud-incidents/{internal_id}'
+                detail_params = {
+                    'include': '_type,status,participants,metadata,notes,lastStatusSetBy',
+                    '_SESSID': self.session_id,
+                }
+                async with session.get(detail_url, params=detail_params) as detail_resp:
+                    detail_resp.raise_for_status()
+                    detail_data = await detail_resp.json()
+
+                # Parse the details
+                incident = self._parse_incident_detail(detail_data)
+                if incident:
+                    new_incidents.append(incident)
+                    self._processed_incidents_ids.add(inc_id)
+
+            # Pagination
+            links = list_data.get('links', {})
+            next_url = links.get('next')
+            if next_url:
+                url = f"{self.base_url}{next_url}"
+                list_params = None
+            else:
+                url = None
+
+        return new_incidents
+
+    def _parse_incident_detail(self, detail_data: dict) -> Optional[FraudIncident]:
+        """Extracts FraudIncident from the full JSON of a single incident."""
+        if 'data' not in detail_data:
+            return None
+        inc_data = detail_data['data']
+        attrs = inc_data['attributes']
+        rels = inc_data.get('relationships', {})
+        included_map = {item['id']: item for item in detail_data.get('included', [])}
+
+        # Incident type
+        type_id = rels['_type']['data']['id']
+        type_obj = included_map.get(type_id, {})
+        incident_type = type_obj.get('attributes', {}).get('name', 'Unknown')
+
+        # Dates
+        date_created = datetime.fromisoformat(attrs['createdAtStamp'].replace('+00:00', '+00:00'))
+        date_updated = datetime.fromisoformat(attrs['updatedAtStamp'].replace('+00:00', '+00:00'))
+
+        # Confidence
+        confidence = int(attrs.get('scoreInPercents', 0))
+
+        # Participants
+        participants_ids = []
+        for p in rels.get('participants', {}).get('data', []):
+            match = re.search(r'/(\d+)$', p['id'])
+            if match:
+                participants_ids.append(int(match.group(1)))
+
+        # Games from metadata
+        games_map: Dict[str, Dict] = {}
+        metadata_rels = rels.get('metadata', {}).get('data', [])
+        for meta_ref in metadata_rels:
+            meta_item = included_map.get(meta_ref['id'])
+            if not meta_item or meta_item.get('type') != 'FraudMetadataItem':
+                continue
+            meta_attrs = meta_item.get('attributes', {})
+            meta_type = meta_attrs.get('_type', {})
+            # Type 5: Chip dumping game
+            if meta_type.get('id') != 5 or meta_type.get('name') != 'Chip dumping game':
+                continue
+            game_id = meta_attrs.get('value')
+            if not game_id:
                 continue
 
-            # Parse seat info: "S 5 5550 6158 john"
-            if line.startswith('S '):
-                parts = line.split()
-                if len(parts) >= 5:
-                    seat = int(parts[1])
-                    stack = float(parts[2]) / 100  # Convert cents to dollars
-                    player_id = parts[3]
-                    name = parts[4]
-                    players_info[seat] = {"name": name, "stack": stack}
-                    self._ensure_player(game_data, name)
+            # Link to player
+            player_rel = meta_item.get('relationships', {}).get('player', {}).get('data')
+            if not player_rel or player_rel.get('type') != 'FraudSuspectPlayer':
+                continue
+            match = re.search(r'/(\d+)$', player_rel['id'])
+            if not match:
+                continue
+            player_id = int(match.group(1))
 
-            # Parse sit down: "SD 3 486 john"
-            elif line.startswith('SD '):
-                parts = line.split()
-                if len(parts) >= 4:
-                    seat = int(parts[1])
-                    name = parts[3]
-                    players_info[seat] = {"name": name, "stack": 0.0}
-                    self._ensure_player(game_data, name)
+            if game_id not in games_map:
+                games_map[game_id] = {
+                    'game_id': game_id,
+                    'participants_ids': set(),
+                    'confidence': 0
+                }
+            games_map[game_id]['participants_ids'].add(player_id)
+            game_conf = int(meta_attrs.get('scoreInPercents', 0))
+            if game_conf > games_map[game_id]['confidence']:
+                games_map[game_id]['confidence'] = game_conf
 
-            # Legacy format: "0  Player Debajitb plays at seat 0 with 9.99"
-            elif 'plays at seat' in line and 'Player' in line:
-                parts = line.split()
-                # "0 Player Debajitb plays at seat 0 with 9.99"
-                #  0    1         2     3   4   5    6   7    8
-                # seat number is at index 6
-                name = parts[2]
-                seat = int(parts[6])
-                stack = float(parts[-1])
-                players_info[seat] = {"name": name, "stack": stack}
-                self._ensure_player(game_data, name)
+        games = [
+            FraudGame(
+                game_id=g['game_id'],
+                participants_ids=list(g['participants_ids']),
+                confidence=g['confidence']
+            )
+            for g in games_map.values()
+        ]
 
-            # Parse game type: "GT 72 F"
-            elif line.startswith('GT '):
-                game_data["game_type"] = self._parse_game_type(line)
-
-            # Parse blinds: "LI 1 100 200 45"
-            elif line.startswith('LI '):
-                parts = line.split()
-                if len(parts) >= 4:
-                    game_data["blinds"]["small"] = float(parts[2]) / 100
-                    game_data["blinds"]["big"] = float(parts[3]) / 100
-
-            # Parse cards dealt to player: "C 2 44 Kc"
-            elif line.startswith('C '):
-                parts = line.split()
-                if len(parts) >= 4:
-                    seat = int(parts[1])
-                    card = parts[3]
-                    if seat in players_info:
-                        player_name = players_info[seat]["name"]
-                        if player_name not in game_data["dealt_cards"]:
-                            game_data["dealt_cards"][player_name] = []
-                        game_data["dealt_cards"][player_name].append(card)
-
-            # Legacy card format: "Dealt to player Debajitb : 8 of clubs"
-            elif 'Dealt to player' in line:
-                match = re.match(r'Dealt to player (\w+)\s*:\s*(.+)', line)
-                if match:
-                    player_name = match.group(1)
-                    card = match.group(2).strip()
-                    if player_name not in game_data["dealt_cards"]:
-                        game_data["dealt_cards"][player_name] = []
-                    game_data["dealt_cards"][player_name].append(card)
-
-            # Parse community cards: "D 17 6d"
-            elif line.startswith('D '):
-                parts = line.split()
-                if len(parts) >= 3:
-                    card = parts[2]
-                    game_data["community_cards"].append(card)
-
-            # Legacy community card: "Card dealt to table: 9 of diamonds"
-            elif 'Card dealt to table:' in line:
-                card = line.split(': ')[-1].strip()
-                game_data["community_cards"].append(card)
-
-            # Parse pot: "B 100 1862" (bets added, pot now...)
-            elif line.startswith('B '):
-                parts = line.split()
-                if len(parts) >= 3:
-                    current_pot = float(parts[2]) / 100
-
-            # Parse player won: "PW 0 490"
-            elif line.startswith('PW '):
-                parts = line.split()
-                if len(parts) >= 3:
-                    seat = int(parts[1])
-                    amount = float(parts[2]) / 100
-                    game_data["result"]["pot"] = amount
-                    if seat in players_info:
-                        game_data["result"]["winner"] = players_info[seat]["name"]
-
-            # Parse pot to player: "PP 2 400 0"
-            elif line.startswith('PP '):
-                parts = line.split()
-                if len(parts) >= 3:
-                    seat = int(parts[1])
-                    amount = float(parts[2]) / 100
-                    game_data["result"]["pot"] += amount
-                    if seat in players_info:
-                        game_data["result"]["winner"] = players_info[seat]["name"]
-
-            # Parse rake: "PR 40 0"
-            elif line.startswith('PR '):
-                parts = line.split()
-                if len(parts) >= 2:
-                    game_data["result"]["rake"] += float(parts[0]) / 100
-
-            # Legacy rake: "Rake was taken 0.75"
-            elif 'Rake was taken' in line:
-                rake = float(line.split()[-1])
-                game_data["result"]["rake"] = rake
-
-            # Legacy winner: "Player Debajitb wins"
-            elif 'wins' in line and 'Player' in line:
-                match = re.search(r'Player (\w+) wins', line)
-                if match:
-                    game_data["result"]["winner"] = match.group(1)
-
-            # Legacy pot: "collects main pot 12.85"
-            elif 'collects main pot' in line or 'collects pot' in line:
-                pot = float(line.split()[-1])
-                game_data["result"]["pot"] = max(game_data["result"]["pot"], pot)
-
-            # Parse actions (betting mnemonics)
-            else:
-                action = self._parse_action(line, players_info)
-                if action:
-                    game_data["actions"].append(action)
-
-        # If pot not found in standard format, calculate from actions
-        if game_data["result"]["pot"] == 0.0 and current_pot > 0:
-            game_data["result"]["pot"] = current_pot
-
-        return GameData(game_data=game_data)
-
-    def _ensure_player(self, game_data: dict, player_name: str):
-        """Add player to game_data if not already present"""
-        if not any(p['name'] == player_name for p in game_data["players"]):
-            game_data["players"].append({
-                "name": player_name,
-                "final_result": "unknown"
-            })
-
-    def _parse_game_type(self, gt_line: str) -> str:
-        """Parse GT mnemonic into human-readable game type"""
-        # Basic implementation - can be extended
-        game_types = {
-            '72': 'Heads-up No Limit Texas Hold\'em',
-            '71': '6-max No Limit Texas Hold\'em',
-            '70': '9-max No Limit Texas Hold\'em',
-        }
-        parts = gt_line.split()
-        if len(parts) >= 2:
-            type_code = parts[1]
-            return game_types.get(type_code, f"Game type {type_code}")
-        return "Unknown"
-
-    def _parse_action(self, line: str, players_info: dict) -> Optional[str]:
-        """Parse a single line into human-readable action description"""
-        parts = line.split()
-        if len(parts) < 2:
-            return None
-
-        # Try to parse mnemonic format
-        code = parts[0]
-
-        # Legacy format: "19  Player Debajitb raises 6.70 to 6.80"
-        legacy_match = re.match(
-            r'(\d+)\s+Player\s+(\w+)\s+(calls|raises|checks|folds|posts|bets)\s*(.*)',
-            line
+        return FraudIncident(
+            id=inc_data['id'],
+            date_created=date_created,
+            date_updated=date_updated,
+            incident_type=incident_type,
+            confidence=confidence,
+            participants_ids=participants_ids,
+            games=games
         )
-        if legacy_match:
-            player = legacy_match.group(2)
-            action = legacy_match.group(3)
-            details = legacy_match.group(4).strip()
-            return f"Player {player} {action} {details}".strip()
 
-        # Check if it's a known mnemonic code
-        if code in self.ACTION_MAP:
-            action_name = self.ACTION_MAP[code]
+    async def fetch_single_game(self, game_id: str) -> GameData:
+        """Fetch and parse game HTML page into GameData using positional row indices."""
+        url = f"{self.base_url}/webadmin-5rd/game/view/id/{game_id}"
+        headers = {
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:152.0) Gecko/20100101 Firefox/152.0",
+            "Referer": f"{self.base_url}/webadmin-5rd/antifraud/incidents",
+        }
+        cookies = {}
+        if self.session_id:
+            cookies["PHPSESSID"] = self.session_id
 
-            # Different mnemonics have different formats
-            if code in ('SB', 'BB', 'EB', 'AN', 'SR', 'BI'):
-                # Format: "SB 4 250"
-                if len(parts) >= 3:
-                    seat = int(parts[1])
-                    amount = float(parts[2]) / 100
-                    player = players_info.get(seat, {}).get("name", f"Seat {seat}")
-                    return f"Player {player} {action_name} {amount}"
+        async with aiohttp.ClientSession(cookies=cookies, headers=headers) as session:
+            async with session.get(url) as resp:
+                resp.raise_for_status()
+                html = await resp.text()
 
-            elif code in ('BT', 'CL', 'RS'):
-                # Format: "BT 4 250"
-                if len(parts) >= 3:
-                    seat = int(parts[1])
-                    amount = float(parts[2]) / 100
-                    player = players_info.get(seat, {}).get("name", f"Seat {seat}")
-                    if code == 'RS' and len(parts) >= 4:
-                        to_amount = float(parts[3]) / 100
-                        return f"Player {player} {action_name} {amount} to {to_amount}"
-                    return f"Player {player} {action_name} {amount}"
+        soup = BeautifulSoup(html, "html.parser")
 
-            elif code in ('CH', 'F', 'FS', 'FF'):
-                # Format: "F 3"
-                if len(parts) >= 2:
-                    seat = int(parts[1])
-                    player = players_info.get(seat, {}).get("name", f"Seat {seat}")
-                    return f"Player {player} {action_name}"
+        # Locate the main info table
+        info_table = soup.find("table", class_="table-bordered")
+        if not info_table:
+            raise ValueError("Main game info table not found")
+        tbody = info_table.find("tbody")
+        if not tbody:
+            raise ValueError("Table body not found")
+        rows = tbody.find_all("tr")
 
-        return None
+        # Helper to extract text from the first td of a given row
+        def get_td_text(row_index):
+            if row_index < len(rows):
+                tds = rows[row_index].find_all("td")
+                if tds:
+                    return tds[0].get_text(strip=True)
+            return ""
+
+        # Row indices (0-based):
+        # 0: ID
+        # 1: Table
+        # 2: Started
+        # 3: Stopped
+        # 4: Cards
+        # 5: Type
+        # 6: Second Runout
+        # 7: Rake
+        # 8: Participants
+        # 9: Insurance
+        # 10: Insurance Result
+
+        # Parse game ID
+        game_id_str = get_td_text(0)
+        match = re.search(r'(\d+)', game_id_str)
+        page_game_id = int(match.group(1)) if match else int(game_id)
+
+        # Parse table ID from link
+        table_cell = rows[1].find("td")
+        table_id = 0
+        if table_cell:
+            a = table_cell.find("a")
+            if a:
+                match = re.search(r'/id/(\d+)', a.get("href", ""))
+                if match:
+                    table_id = int(match.group(1))
+
+        # Parse start date
+        def parse_date(text):
+            try:
+                return datetime.strptime(text, "%Y/%m/%d %H:%M:%S")
+            except ValueError:
+                raise ValueError(f"Invalid datetime format: {text}")
+
+        date_start_str = get_td_text(2)
+        date_start = parse_date(date_start_str) if date_start_str else None
+
+        # Parse stop date
+        date_stop_str = get_td_text(3)
+        date_stop = parse_date(date_stop_str) if date_stop_str else None
+
+        # Parse game type
+        game_type = get_td_text(5)
+
+        # Parse rake
+        rake_str = get_td_text(7)
+        rake = float(rake_str) if rake_str else 0.0
+
+        # Parse community cards from img titles
+        cards = []
+        cards_row = rows[4].find("td")
+        if cards_row:
+            for img in cards_row.find_all("img"):
+                title = img.get("title", "")
+                if title:
+                    cards.append(title)
+
+        # Parse participants from inner table
+        participants = []
+        participants_row = rows[8].find("td")
+        if participants_row:
+            inner_table = participants_row.find("table", class_="inner-table")
+            if inner_table:
+                for row in inner_table.find_all("tr")[1:]:
+                    cols = row.find_all("td")
+                    if len(cols) >= 3:
+                        try:
+                            part_id = int(cols[0].get_text(strip=True))
+                        except ValueError:
+                            continue
+                        a_tag = cols[1].find("a")
+                        player_id = 0
+                        if a_tag:
+                            href = a_tag.get("href", "")
+                            match = re.search(r'/id/(\d+)', href)
+                            if match:
+                                player_id = int(match.group(1))
+                        try:
+                            stack = int(cols[2].get_text(strip=True))
+                        except ValueError:
+                            stack = 0
+                        participants.append(Participant(
+                            id=part_id,
+                            player_id=player_id,
+                            stack_at_hand_end=stack
+                        ))
+
+        # Parse raw hand history: combine the <pre> text and the viewing-table
+        raw_history_parts = []
+        history_header = soup.find("h2", string="История руки")
+        if history_header:
+            # Find the parent div that wraps the whole history block
+            history_div = history_header.find_parent("div")
+            if history_div:
+                # Get text from <pre> if present
+                pre_tag = history_div.find("pre")
+                if pre_tag:
+                    raw_history_parts.append(pre_tag.get_text(separator="\n", strip=True))
+                # Get text from the actions table
+                actions_table = history_div.find("table", class_="viewing-table")
+                if actions_table:
+                    rows = actions_table.find_all("tr")[1:]  # skip header
+                    for row in rows:
+                        cols = row.find_all("td")
+                        if len(cols) == 2:
+                            second = cols[0].get_text(strip=True)
+                            action = cols[1].get_text(strip=True)
+                            raw_history_parts.append(f"[{second}s] {action}")
+        raw_history = "\n".join(raw_history_parts)
+
+        return GameData(
+            game_id=page_game_id,
+            table_id=table_id,
+            date_start=date_start,
+            date_stop=date_stop,
+            game_type=game_type,
+            rake=rake,
+            cards=cards,
+            participants=participants,
+            raw_hand_history=raw_history
+        )
