@@ -75,8 +75,7 @@ class ConsoleUI(UI):
         self.analyzing_task = None
 
     async def _cmd_change_model(self, model_id: str):
-        print(model_id) #временная затычка
-        # что-то типа self.fraud_detection_manager.set_model(model_id)
+        self.fraud_detection_manager.set_model(model_id)
 
     async def _cmd_set_interval(self, interval_str: str):
         try:

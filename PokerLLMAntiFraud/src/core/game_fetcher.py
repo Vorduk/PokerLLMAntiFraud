@@ -33,7 +33,7 @@ class GameFetcher:
             self._http_session = None
 
     # Real API fetching of fraud incidents
-    async def fetch_new_incidents(self, lookback_minutes: int = 5) -> List[FraudIncident]:
+    async def fetch_new_incidents(self, lookback_minutes: int) -> List[FraudIncident]:
         session = await self._get_session()
         now = datetime.now(timezone.utc)
         from_time = now - timedelta(minutes=lookback_minutes)
@@ -193,16 +193,17 @@ class GameFetcher:
 
         soup = BeautifulSoup(html, "html.parser")
 
-        # Locate the main info table
-        info_table = soup.find("table", class_="table-bordered")
+        # Locate the main info table – try new layout first, then old
+        info_table = soup.find("table", class_="viewing-table")  # new style
+        if not info_table:
+            info_table = soup.find("table", class_="table-bordered")  # old style
         if not info_table:
             raise ValueError("Main game info table not found")
-        tbody = info_table.find("tbody")
-        if not tbody:
-            raise ValueError("Table body not found")
-        rows = tbody.find_all("tr")
 
-        # Helper to extract text from the first td of a given row
+        # Get all rows (new layout may not have <tbody>)
+        rows = info_table.find_all("tr")
+
+        # Helper to extract text from the first td of a given row (old layout fallback)
         def get_td_text(row_index):
             if row_index < len(rows):
                 tds = rows[row_index].find_all("td")
@@ -210,7 +211,25 @@ class GameFetcher:
                     return tds[0].get_text(strip=True)
             return ""
 
-        # Row indices (0-based):
+        # Universal helper: search by <th> text and return the following <td> text
+        def get_value_by_label(label):
+            for row in rows:
+                th = row.find("th")
+                if th and th.get_text(strip=True) == label:
+                    td = row.find("td")
+                    if td:
+                        return td.get_text(strip=True)
+            # Fallback to old positional indices if label not found
+            label_to_index = {
+                "ID:": 0, "Стол:": 1, "Начат:": 2, "Остановлен:": 3,
+                "Карты:": 4, "Тип:": 5, "Рейк:": 7
+            }
+            idx = label_to_index.get(label)
+            if idx is not None:
+                return get_td_text(idx)
+            return ""
+
+        # Row indices (0-based) – used as fallback for old layout
         # 0: ID
         # 1: Table
         # 2: Started
@@ -224,12 +243,19 @@ class GameFetcher:
         # 10: Insurance Result
 
         # Parse game ID
-        game_id_str = get_td_text(0)
+        game_id_str = get_value_by_label("ID:")
         match = re.search(r'(\d+)', game_id_str)
         page_game_id = int(match.group(1)) if match else int(game_id)
 
         # Parse table ID from link
-        table_cell = rows[1].find("td")
+        table_cell = None
+        for row in rows:
+            th = row.find("th")
+            if th and th.get_text(strip=True) == "Стол:":
+                table_cell = row.find("td")
+                break
+        if not table_cell and len(rows) > 1:  # fallback to row 1
+            table_cell = rows[1].find("td")
         table_id = 0
         if table_cell:
             a = table_cell.find("a")
@@ -245,80 +271,104 @@ class GameFetcher:
             except ValueError:
                 raise ValueError(f"Invalid datetime format: {text}")
 
-        date_start_str = get_td_text(2)
+        date_start_str = get_value_by_label("Начат:")
         date_start = parse_date(date_start_str) if date_start_str else None
 
         # Parse stop date
-        date_stop_str = get_td_text(3)
+        date_stop_str = get_value_by_label("Остановлен:")
         date_stop = parse_date(date_stop_str) if date_stop_str else None
 
         # Parse game type
-        game_type = get_td_text(5)
+        game_type = get_value_by_label("Тип:")
 
         # Parse rake
-        rake_str = get_td_text(7)
-        rake = float(rake_str) if rake_str else 0.0
+        rake_str = get_value_by_label("Рейк:")
+        # Remove currency symbols, commas and spaces
+        clean_rake = re.sub(r'[^\d.\-]', '', rake_str) if rake_str else ''
+        rake = float(clean_rake) if clean_rake else 0.0
 
         # Parse community cards from img titles
         cards = []
-        cards_row = rows[4].find("td")
-        if cards_row:
-            for img in cards_row.find_all("img"):
-                title = img.get("title", "")
-                if title:
-                    cards.append(title)
+        for row in rows:
+            th = row.find("th")
+            if th and th.get_text(strip=True) == "Карты:":
+                td = row.find("td")
+                if td:
+                    for img in td.find_all("img"):
+                        title = img.get("title", "")
+                        if title:
+                            cards.append(title)
+                break
+        # Fallback to old row index if not found
+        if not cards and len(rows) > 4:
+            cards_row = rows[4].find("td")
+            if cards_row:
+                for img in cards_row.find_all("img"):
+                    title = img.get("title", "")
+                    if title:
+                        cards.append(title)
 
         # Parse participants from inner table
         participants = []
-        participants_row = rows[8].find("td")
-        if participants_row:
-            inner_table = participants_row.find("table", class_="inner-table")
-            if inner_table:
-                for row in inner_table.find_all("tr")[1:]:
-                    cols = row.find_all("td")
-                    if len(cols) >= 3:
-                        try:
-                            part_id = int(cols[0].get_text(strip=True))
-                        except ValueError:
-                            continue
-                        a_tag = cols[1].find("a")
-                        player_id = 0
-                        if a_tag:
-                            href = a_tag.get("href", "")
-                            match = re.search(r'/id/(\d+)', href)
-                            if match:
-                                player_id = int(match.group(1))
-                        try:
-                            stack = int(cols[2].get_text(strip=True))
-                        except ValueError:
-                            stack = 0
-                        participants.append(Participant(
-                            id=part_id,
-                            player_id=player_id,
-                            stack_at_hand_end=stack
-                        ))
+        # Look for inner table anywhere (new layout puts it inside a <td colspan="2">)
+        inner_table = info_table.find("table", class_="inner-table")
+        if inner_table:
+            for row in inner_table.find_all("tr")[1:]:  # skip header
+                cols = row.find_all("td")
+                if len(cols) >= 3:
+                    try:
+                        part_id = int(cols[0].get_text(strip=True))
+                    except ValueError:
+                        continue
+                    a_tag = cols[1].find("a")
+                    player_id = 0
+                    if a_tag:
+                        href = a_tag.get("href", "")
+                        match = re.search(r'/id/(\d+)', href)
+                        if match:
+                            player_id = int(match.group(1))
+                    # Stack may contain '$' and commas
+                    stack_text = cols[2].get_text(strip=True)
+                    clean_stack = re.sub(r'[^\d.\-]', '', stack_text)
+                    try:
+                        stack = int(float(clean_stack)) if clean_stack else 0
+                    except ValueError:
+                        stack = 0
+                    participants.append(Participant(
+                        id=part_id,
+                        player_id=player_id,
+                        stack_at_hand_end=stack
+                    ))
 
-        # Parse raw hand history: combine the <pre> text and the viewing-table
+        # Parse raw hand history: combine the <pre> text and the actions table
         raw_history_parts = []
-        history_header = soup.find("h2", string="История руки")
+        history_header = soup.find("h2", string="История руки") or soup.find("h3", string="История руки")
         if history_header:
-            # Find the parent div that wraps the whole history block
-            history_div = history_header.find_parent("div")
-            if history_div:
-                # Get text from <pre> if present
-                pre_tag = history_div.find("pre")
+            # Find a proper container that holds both <pre> and the actions table
+            # Try common wrapper classes first, then fall back to any parent <div>
+            container = history_header.find_parent("div", class_="box") or \
+                        history_header.find_parent("div", class_="game-info-hand-history") or \
+                        history_header.find_parent("div", class_="row game-info")
+            if container is None:
+                container = history_header.find_parent("div")  # last resort
+
+            if container:
+                # Get text from <pre> if present (new layout uses game-info-hand-history-start)
+                pre_tag = container.find("pre")
                 if pre_tag:
                     raw_history_parts.append(pre_tag.get_text(separator="\n", strip=True))
-                # Get text from the actions table
-                actions_table = history_div.find("table", class_="viewing-table")
+
+                # Get text from the actions table (old layout uses viewing-table, new uses hand-history-table)
+                actions_table = container.find("table", class_="viewing-table") or \
+                                container.find("table", class_="hand-history-table")
                 if actions_table:
-                    rows = actions_table.find_all("tr")[1:]  # skip header
-                    for row in rows:
+                    for row in actions_table.find_all("tr")[1:]:  # skip header
                         cols = row.find_all("td")
                         if len(cols) == 2:
                             second = cols[0].get_text(strip=True)
                             action = cols[1].get_text(strip=True)
                             raw_history_parts.append(f"[{second}s] {action}")
+
         raw_history = "\n".join(raw_history_parts)
 
         return GameData(

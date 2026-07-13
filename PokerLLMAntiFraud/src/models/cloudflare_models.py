@@ -20,7 +20,6 @@ class CloudflareModels(BaseModel):
         }
 
     def _build_prompt(self, game_data: GameData) -> str:
-        """Build prompt for fraud detection in poker"""
         players_text = ""
         for p in game_data.participants:
             players_text += f"- Player {p.player_id} (stack: {p.stack_at_hand_end})\n"
@@ -45,12 +44,14 @@ class CloudflareModels(BaseModel):
     {game_data.raw_hand_history[:3000]}
 
     TASK:
-    Analyze this hand for potential fraud indicators:
-    1. Unusual betting patterns
-    2. Suspicious timing
-    3. Potential collusion (soft play, chip dumping)
-    4. Bot-like behavior (mechanical patterns, unnatural bet sizing)
-    5. Card sharing (players knowing cards they shouldn't)
+    Look specifically for these fraud types:
+    - cash chipdumping
+    - zero rake (rake is 0 in a real money game)
+    - fraudulent showdown (collusion to inflate pot)
+
+    If none of these types are present, set incident_types to an empty list.
+
+    If the hand history is too short or lacks meaningful actions, return empty incident_types and note insufficient data.
 
     RESPOND IN THIS EXACT JSON FORMAT:
     {{
@@ -81,7 +82,7 @@ class CloudflareModels(BaseModel):
 
                 data = await response.json()
 
-                print("\n[DEBUG] Full API response:", json.dumps(data, indent=2, ensure_ascii=False))
+                #print("\n[DEBUG] Full API response:", json.dumps(data, indent=2, ensure_ascii=False))
 
                 if not data.get("success", False):
                     errors = data.get("errors", [])

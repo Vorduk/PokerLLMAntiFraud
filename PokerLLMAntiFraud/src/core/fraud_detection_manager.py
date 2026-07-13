@@ -1,10 +1,8 @@
 from .game_fetcher import GameFetcher
 from .ai_analyzer import AIAnalyzer
-from PokerLLMAntiFraud.src.models.mydataclasses import FraudDetectionResponse
 from .mydataclasses import FraudRecord
 from typing import List
-from datetime import datetime
-from ..models import GameData
+from PokerLLMAntiFraud.src.models import GameData
 from .table_formatter import TableFormatter
 
 
@@ -21,7 +19,7 @@ class FraudDetectionManager:
         self.table_formatter = table_formatter
 
     async def step(self):
-        incidents = await self.fetcher.fetch_new_incidents() # Incidents (contain many games)
+        incidents = await self.fetcher.fetch_new_incidents(1000) # Incidents (contain many games)
         if not incidents:
             print("No new incidents")
             return
@@ -37,6 +35,17 @@ class FraudDetectionManager:
                     print(f"Error fetching game {game.game_id}: {e}")
                     continue
 
+                if not game_data.participants:
+                    record = FraudRecord(
+                        time=inc.date_updated,
+                        game_id=game_data.game_id,
+                        incident_types=[],
+                        participants_ids=game.participants_ids,
+                        description="Insufficient data for analysis"
+                    )
+                    records.append(record)
+                    continue
+
                 try:
                     response = await self.analyzer.analyze_game(game_data, self.model_id)
                 except Exception as e:
@@ -46,15 +55,14 @@ class FraudDetectionManager:
                 record = FraudRecord(
                     time=inc.date_updated,
                     game_id=game_data.game_id,
-                    incident_types=["Сделать в result поле типы инцидентов и получать оттуда"],
+                    incident_types=response.incident_types,
                     participants_ids=game.participants_ids,
-                    description=response.reasoning
+                    description=response.reasoning,
                 )
                 records.append(record)
 
-        if records:
-            self.table_formatter.save_result(records)
-            print(f"Saved {len(records)} analysis results")
+                if record:
+                    self.table_formatter.save_result(records)
 
     def set_model(self, model_id: str):
         self.model_id = model_id
