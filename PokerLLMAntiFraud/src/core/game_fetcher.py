@@ -1,5 +1,5 @@
-from PokerLLMAntiFraud.src.core.mydataclasses import FraudIncident, FraudGame
-from PokerLLMAntiFraud.src.models.mydataclasses import GameData, Participant
+from .mydataclasses import FraudIncident, FraudGame
+from ..models.mydataclasses import GameData, Participant
 import re
 import aiohttp
 from bs4 import BeautifulSoup
@@ -13,6 +13,10 @@ class GameFetcher:
         self._processed_incidents_ids: set = set()
         self._processed_game_ids: set = set()
         self._http_session: Optional[aiohttp.ClientSession] = None
+        self.lookback_minutes: int = 1440
+
+    def set_lookback(self, lookback_minutes: int):
+        self.lookback_minutes=lookback_minutes
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._http_session is None:
@@ -33,10 +37,10 @@ class GameFetcher:
             self._http_session = None
 
     # Real API fetching of fraud incidents
-    async def fetch_new_incidents(self, lookback_minutes: int) -> List[FraudIncident]:
+    async def fetch_new_incidents(self) -> List[FraudIncident]:
         session = await self._get_session()
         now = datetime.now(timezone.utc)
-        from_time = now - timedelta(minutes=lookback_minutes)
+        from_time = now - timedelta(minutes=self.lookback_minutes)
 
         # Get the list of incidents (without metadata)
         list_params = {

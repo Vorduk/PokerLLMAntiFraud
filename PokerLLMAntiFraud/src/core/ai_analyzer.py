@@ -1,6 +1,6 @@
-from PokerLLMAntiFraud.src.models.mydataclasses import GameData, FraudDetectionResponse
-from PokerLLMAntiFraud.src.models.model_factory import ModelFactory
-from PokerLLMAntiFraud.src.models.base_model import BaseModel
+from ..models.mydataclasses import GameData, FraudDetectionResponse
+from ..models.model_factory import ModelFactory
+from ..models.base_model import BaseModel
 
 class AIAnalyzer:
 

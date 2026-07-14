@@ -1,11 +1,15 @@
 import os
 import openpyxl
+from pathlib import Path
 from openpyxl.utils import get_column_letter
 from .mydataclasses import FraudRecord
 from typing import List
 
 class TableFormatter:
-    def __init__(self, filename: str = "../results.xlsx"):
+    def __init__(self, filename: str = None):
+        if filename is None:
+            project_root = Path(__file__).parent.parent.parent
+            filename = str(project_root / "results.xlsx")
         self.filename = filename
         base, ext = os.path.splitext(filename)
         self.temp_filename = f"{base}_temp{ext}"
@@ -15,28 +19,26 @@ class TableFormatter:
         base, ext = os.path.splitext(new_filename)
         self.temp_filename = f"{base}_temp{ext}"
 
-    def save_result(self, records: List[FraudRecord]) -> None:
-        """Save records to the main file, falling back to a temp file if locked."""
-        if not records:
+    def save_result(self, record: FraudRecord) -> None:
+        if record is None:
             return
 
         # 1. Try to merge any leftover temp file into the main file
         self._merge_temp_if_possible()
 
-        # 2. Try to write new records directly to the main file
+        # 2. Try to write new record directly to the main file
         try:
             wb, ws = self._prepare_workbook(self.filename)
-            self._insert_records(ws, records)
+            self._insert_records(ws, [record])  # передаём список из одной записи
             self._auto_fit_columns(ws)
             wb.save(self.filename)
             return
         except PermissionError:
-            # Main file is locked → write everything into temp file
             pass
 
         # 3. Fallback: append new records to the temp file
         wb, ws = self._prepare_workbook(self.temp_filename)
-        self._insert_records(ws, records)
+        self._insert_records(ws, [record])
         self._auto_fit_columns(ws)
         wb.save(self.temp_filename)
 

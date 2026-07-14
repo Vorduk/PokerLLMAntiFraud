@@ -1,14 +1,14 @@
 import asyncio
 import sys
 from .ui import UI
-from PokerLLMAntiFraud.src.core.fraud_detection_manager import FraudDetectionManager
+from ..core.fraud_detection_manager import FraudDetectionManager
 
 class ConsoleUI(UI):
     def __init__(self, fraud_detection_manager: FraudDetectionManager):
         super().__init__(fraud_detection_manager)
         self.analyzing_task: asyncio.Task | None = None
         self.reading_task: asyncio.Task | None = None
-        self.interval = 30.0
+        self.interval = 60
 
     async def run(self):
         self._print_header()
@@ -34,6 +34,7 @@ class ConsoleUI(UI):
         print("stop                     - Stop games analyzing")
         print("change_model <model id>  - Change ai model by id")
         print("set_interval <interval>  - Update interval in seconds")
+        print("set_lookback <interval>  - Lookback interval in minutes")
         print("exit                     - Completely stop program")
 
     async def _read_commands(self):
@@ -54,6 +55,9 @@ class ConsoleUI(UI):
             elif cmd.startswith('set_interval '):
                 interval_str = cmd.split(' ', 1)[1]
                 await self._cmd_set_interval(interval_str)
+            elif cmd.startswith('set_lookback '):
+                interval_str = cmd.split(' ', 1)[1]
+                await self._cmd_set_lookback(interval_str)
             elif cmd == 'exit':
                 self.is_running = False
             else:
@@ -85,6 +89,17 @@ class ConsoleUI(UI):
                 return
             self.interval = new_interval
             print(f"Interval set to {self.interval} seconds.")
+        except ValueError:
+            print("Invalid interval. Please enter a number")
+
+    async def _cmd_set_lookback(self, interval_str: str):
+        try:
+            new_interval = float(interval_str)
+            if new_interval <= 0:
+                print("Interval must be a positive number.")
+                return
+            self.interval = new_interval
+            print(f"Interval set to {self.interval} minutes.")
         except ValueError:
             print("Invalid interval. Please enter a number")
 

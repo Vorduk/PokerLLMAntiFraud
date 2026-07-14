@@ -1,9 +1,9 @@
 import asyncio
-from core import FraudDetectionManager, GameFetcher, AIAnalyzer, TableFormatter
+from .core import FraudDetectionManager, GameFetcher, AIAnalyzer, TableFormatter
 import os
-from config import ConfigLoader
-from models import ModelFactory
-from ui import ConsoleUI
+from .config import ConfigLoader
+from .models import ModelFactory
+from .ui import ConsoleUI
 
 async def main():
     print("Poker fraud AI detection system")

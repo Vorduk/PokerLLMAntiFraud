@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from PokerLLMAntiFraud.src.core.fraud_detection_manager import FraudDetectionManager
+from ..core.fraud_detection_manager import FraudDetectionManager
 
 class UI(ABC):
     def __init__(self, fraud_detection_manager: FraudDetectionManager):

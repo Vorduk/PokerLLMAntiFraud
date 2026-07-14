@@ -2,7 +2,7 @@ from .game_fetcher import GameFetcher
 from .ai_analyzer import AIAnalyzer
 from .mydataclasses import FraudRecord
 from typing import List
-from PokerLLMAntiFraud.src.models import GameData
+from ..models import GameData
 from .table_formatter import TableFormatter
 
 
@@ -19,18 +19,15 @@ class FraudDetectionManager:
         self.table_formatter = table_formatter
 
     async def step(self):
-        incidents = await self.fetcher.fetch_new_incidents(1000) # Incidents (contain many games)
+        incidents = await self.fetcher.fetch_new_incidents()
         if not incidents:
             print("No new incidents")
             return
 
-        records: List[FraudRecord] = [] # To write in table file
-
-        for inc in incidents: # Check ALL incidents
-            for game in inc.games: # Check ALL games in particular incident
-
+        for inc in incidents:
+            for game in inc.games:
                 try:
-                    game_data : GameData = await self.fetcher.fetch_single_game(game.game_id)
+                    game_data: GameData = await self.fetcher.fetch_single_game(game.game_id)
                 except Exception as e:
                     print(f"Error fetching game {game.game_id}: {e}")
                     continue
@@ -43,7 +40,7 @@ class FraudDetectionManager:
                         participants_ids=game.participants_ids,
                         description="Insufficient data for analysis"
                     )
-                    records.append(record)
+                    self.table_formatter.save_result(record)
                     continue
 
                 try:
@@ -59,10 +56,7 @@ class FraudDetectionManager:
                     participants_ids=game.participants_ids,
                     description=response.reasoning,
                 )
-                records.append(record)
-
-                if record:
-                    self.table_formatter.save_result(records)
+                self.table_formatter.save_result(record)
 
     def set_model(self, model_id: str):
         self.model_id = model_id
