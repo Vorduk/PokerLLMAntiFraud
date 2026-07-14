@@ -7,38 +7,31 @@ from datetime import datetime, timezone, timedelta
 from typing import List, Dict, Optional
 
 class GameFetcher:
-    def __init__(self, base_url: str, session_id: str = None):
+    def __init__(self, base_url: str, session: aiohttp.ClientSession, session_id: str = None):
+        """
+        Args:
+            base_url: base URL of the admin panel (e.g. https://demotest.evenbetpoker.com)
+            session: shared aiohttp.ClientSession with pre‑configured cookies and headers.
+        """
         self.base_url = base_url.rstrip('/')
+        self._http_session = session          # shared session, already authenticated
         self.session_id = session_id
         self._processed_incidents_ids: set = set()
         self._processed_game_ids: set = set()
-        self._http_session: Optional[aiohttp.ClientSession] = None
         self.lookback_minutes: int = 1440
 
     def set_lookback(self, lookback_minutes: int):
-        self.lookback_minutes=lookback_minutes
-
-    async def _get_session(self) -> aiohttp.ClientSession:
-        if self._http_session is None:
-            self._http_session = aiohttp.ClientSession(
-                cookies={'PHPSESSID': self.session_id} if self.session_id else {},
-                headers={
-                    'Accept': 'application/vnd.api+json',
-                    'Content-Type': 'application/vnd.api+json',
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:152.0) Gecko/20100101 Firefox/152.0',
-                    'Referer': f'{self.base_url}/webadmin-5rd/antifraud/incidents',
-                }
-            )
-        return self._http_session
+        self.lookback_minutes = lookback_minutes
 
     async def close(self):
+        """Close the underlying HTTP session (should be done once by the creator)."""
         if self._http_session:
             await self._http_session.close()
             self._http_session = None
 
     # Real API fetching of fraud incidents
     async def fetch_new_incidents(self) -> List[FraudIncident]:
-        session = await self._get_session()
+        session = self._http_session   # use shared session directly
         now = datetime.now(timezone.utc)
         from_time = now - timedelta(minutes=self.lookback_minutes)
 
@@ -50,8 +43,11 @@ class GameFetcher:
             'order[updatedAtStamp]': 'desc',
             'from': from_time.strftime('%Y-%m-%dT%H:%M:%S.000Z'),
             'to': now.strftime('%Y-%m-%dT%H:%M:%S.000Z'),
-            '_SESSID': self.session_id,
         }
+        # The API requires the session ID as a query parameter in addition to cookies
+        if self.session_id:
+            list_params['_SESSID'] = self.session_id
+
         url = f'{self.base_url}/apiweb/fraud-incidents'
         new_incidents = []
 
@@ -72,8 +68,10 @@ class GameFetcher:
                 detail_url = f'{self.base_url}/apiweb/fraud-incidents/{internal_id}'
                 detail_params = {
                     'include': '_type,status,participants,metadata,notes,lastStatusSetBy',
-                    '_SESSID': self.session_id,
                 }
+                if self.session_id:
+                    detail_params['_SESSID'] = self.session_id
+
                 async with session.get(detail_url, params=detail_params) as detail_resp:
                     detail_resp.raise_for_status()
                     detail_data = await detail_resp.json()
@@ -181,19 +179,15 @@ class GameFetcher:
     async def fetch_single_game(self, game_id: str) -> GameData:
         """Fetch and parse game HTML page into GameData using positional row indices."""
         url = f"{self.base_url}/webadmin-5rd/game/view/id/{game_id}"
-        headers = {
+        # Override Accept header for HTML (shared session defaults are for API)
+        html_headers = {
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:152.0) Gecko/20100101 Firefox/152.0",
             "Referer": f"{self.base_url}/webadmin-5rd/antifraud/incidents",
         }
-        cookies = {}
-        if self.session_id:
-            cookies["PHPSESSID"] = self.session_id
 
-        async with aiohttp.ClientSession(cookies=cookies, headers=headers) as session:
-            async with session.get(url) as resp:
-                resp.raise_for_status()
-                html = await resp.text()
+        async with self._http_session.get(url, headers=html_headers) as resp:
+            resp.raise_for_status()
+            html = await resp.text()
 
         soup = BeautifulSoup(html, "html.parser")
 
